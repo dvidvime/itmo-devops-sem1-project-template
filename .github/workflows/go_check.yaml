@@ -111,6 +111,7 @@ jobs:
           exit 1
         fi
   build_and_push_to_docker_hub:
+    name: Build image and push to Dockerhub
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -126,6 +127,5 @@ jobs:
       - name: Build&push backend to DockerHub
         uses: docker/build-push-action@v4
         with:
-          context: ./backend/
           push: true
           tags: ${{ secrets.DOCKERHUB_LOGIN }}/project_store:latest
