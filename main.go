@@ -16,7 +16,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,12 +65,12 @@ func createCsvFile(items []Item) ([][]string, error) {
 	return result, nil
 }
 
-func readCsvFile(csvFile io.Reader) ([]Item, int, float64, error) {
+func readCsvFile(csvFile io.Reader) ([]Item, int, error) {
 	csvReader := csv.NewReader(csvFile)
 	records, err := csvReader.ReadAll()
 	if err != nil {
 		log.Println(err)
-		return nil, 0, 0, err
+		return nil, 0, err
 	}
 
 	const (
@@ -83,27 +82,47 @@ func readCsvFile(csvFile io.Reader) ([]Item, int, float64, error) {
 	)
 
 	var items []Item
-	var categories []string
-	var priceSum float64
+	var incorrectRecords int
 
 	for _, record := range records[1:] {
-		id, _ := strconv.Atoi(record[Id])
-		name := record[Name]
-		category := record[Category]
-		price, _ := strconv.ParseFloat(record[Price], 64)
-		createdAt, _ := time.Parse("2006-01-02", record[CreatedAt])
-
-		if !slices.Contains(categories, category) {
-			categories = append(categories, category)
+		id, err := strconv.Atoi(record[Id])
+		if err != nil {
+			log.Printf("Not a number : id %v : %v\n", record[Id], err)
+			incorrectRecords++
+			continue
 		}
-
-		priceSum += price
+		name := record[Name]
+		if len(name) == 0 {
+			log.Printf("Empty name : id %v : %v\n", record[Id], err)
+			incorrectRecords++
+			continue
+		}
+		category := record[Category]
+		if len(category) == 0 {
+			log.Printf("Empty category : id %v : %v\n", record[Id], err)
+			incorrectRecords++
+			continue
+		}
+		price, err := strconv.ParseFloat(record[Price], 64)
+		if price <= 0 || err != nil {
+			log.Printf("Invalid price %v : id %v : %v\n", record[Price], record[Id], err)
+			incorrectRecords++
+			continue
+		}
+		createdAt, err := time.Parse("2006-01-02", record[CreatedAt])
+		if createdAt.After(time.Now()) || err != nil {
+			log.Printf("Invalid date %v : id %v : %v\n", record[CreatedAt], record[Id], err)
+			incorrectRecords++
+			continue
+		}
 
 		items = append(items, Item{id, name, category, price, createdAt})
 
-		//fmt.Println(id, name, category, price, createdAt)
+		log.Println("New item", id, name, category, price, createdAt)
 	}
-	return items, len(categories), roundFloat(priceSum, 2), nil
+	lenRead := len(records) - 1
+	log.Printf("Read %d records, %d incorrect\n", lenRead, incorrectRecords)
+	return items, lenRead, nil
 }
 
 func saveItems(ctx context.Context, items []Item) error {
@@ -172,6 +191,26 @@ func readItems(ctx context.Context) ([]Item, error) {
 	return items, nil
 }
 
+func removeDuplicates(left []Item, right []Item) ([]Item, int) {
+	// remove from left elements found in right and count duplicates
+	rMap := make(map[int]struct{})
+	for _, b := range right {
+		rMap[b.Id] = struct{}{}
+	}
+
+	var uniqueItems []Item
+	for _, a := range left {
+		if _, found := rMap[a.Id]; !found {
+			uniqueItems = append(uniqueItems, a)
+		}
+	}
+
+	d := len(left) - len(uniqueItems)
+	log.Printf("Removed %d duplicates\n", d)
+
+	return uniqueItems, d
+}
+
 func extractArchive(file multipart.File, fileHeader *multipart.FileHeader, paramType string) (map[string][]byte, error) {
 	contents := make(map[string][]byte)
 
@@ -225,7 +264,8 @@ func extractArchive(file multipart.File, fileHeader *multipart.FileHeader, param
 
 func postHandler(w http.ResponseWriter, r *http.Request) {
 	var items []Item
-	var numCategories int
+	var itemsRead int
+	var totalCategories int
 	var totalPrice float64
 
 	paramType := r.FormValue("type")
@@ -258,7 +298,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 
 		f := bytes.NewReader(content)
 
-		items, numCategories, totalPrice, err = readCsvFile(f)
+		items, itemsRead, err = readCsvFile(f)
 		if err != nil {
 			log.Println(err)
 			http.Error(w, "Error reading csv", http.StatusInternalServerError)
@@ -268,6 +308,16 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		break
 	}
 
+	// get everything from database
+	itemsDb, err := readItems(r.Context())
+	if err != nil {
+		log.Println(err)
+		http.Error(w, "Error reading database", http.StatusInternalServerError)
+		return
+	}
+
+	items, duplicatesCount := removeDuplicates(items, itemsDb)
+
 	// write to database
 	if err = saveItems(r.Context(), items); err != nil {
 		log.Println(err)
@@ -275,16 +325,34 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// retrieve total price
+	row := DB.QueryRowContext(r.Context(), "SELECT SUM(price) FROM prices")
+	if err = row.Scan(&totalPrice); err != nil {
+		log.Println("Failed to retrieve total price", err)
+	}
+
+	// retrieve total categories
+	row = DB.QueryRowContext(r.Context(), "SELECT COUNT(DISTINCT category) FROM prices")
+	if err = row.Scan(&totalCategories); err != nil {
+		log.Println("Failed to retrieve total categories", err)
+	}
+
 	// return JSON with summary
 	resultSummary := struct {
+		TotalCount      int     `json:"total_count"`
+		DuplicatesCount int     `json:"duplicates_count"`
 		TotalItems      int     `json:"total_items"`
 		TotalCategories int     `json:"total_categories"`
 		TotalPrice      float64 `json:"total_price"`
 	}{
+		TotalCount:      itemsRead,
+		DuplicatesCount: duplicatesCount,
 		TotalItems:      len(items),
-		TotalCategories: numCategories,
-		TotalPrice:      totalPrice,
+		TotalCategories: totalCategories,
+		TotalPrice:      roundFloat(totalPrice, 2),
 	}
+
+	log.Printf("%+v\n", resultSummary)
 
 	jsonData, err := json.Marshal(resultSummary)
 	if err != nil {
