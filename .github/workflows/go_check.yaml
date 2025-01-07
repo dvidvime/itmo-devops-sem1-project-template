@@ -13,7 +13,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:15
+        image: postgres:17
         env:
           POSTGRES_DB: project-sem-1
           POSTGRES_USER: validator
@@ -23,6 +23,7 @@ jobs:
         # Добавляем volume для сохранения данных
         volumes:
           - postgres_data:/var/lib/postgresql/data
+          - ./init.sql:/docker-entrypoint-initdb.d/init.sql
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -35,7 +36,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.23'
+        go-version: '1.23.3'
 
     - name: Make scripts executable
       run: |
