@@ -39,6 +39,22 @@ type Item struct {
 	CreatedAt time.Time
 }
 
+type filterParams struct {
+	startDate string
+	endDate   string
+	minPrice  int
+	maxPrice  int
+}
+
+func setDefaultFilterParams() filterParams {
+	return filterParams{
+		startDate: "1970-01-01",
+		endDate:   "5999-01-01",
+		minPrice:  0,
+		maxPrice:  2147483647,
+	}
+}
+
 func roundFloat(val float64, precision uint) float64 {
 	ratio := math.Pow(10, float64(precision))
 	return math.Round(val*ratio) / ratio
@@ -49,7 +65,7 @@ func createCsvFile(items []Item) ([][]string, error) {
 	result := make([][]string, numItems+1)
 
 	// heading line
-	result[0] = []string{"id", "name", "category", "price", "created"}
+	result[0] = []string{"id", "name", "category", "price", "create_date"}
 
 	// add rows with formatted data
 	for i := 0; i < numItems; i++ {
@@ -110,15 +126,18 @@ func readCsvFile(csvFile io.Reader) ([]Item, int, error) {
 			continue
 		}
 		createdAt, err := time.Parse("2006-01-02", record[CreatedAt])
-		if createdAt.After(time.Now()) || err != nil {
+		if err != nil {
 			log.Printf("Invalid date %v : id %v : %v\n", record[CreatedAt], record[Id], err)
+			incorrectRecords++
+			continue
+		}
+		if createdAt.After(time.Now()) {
+			log.Printf("Future date %v : id %v : %v\n", record[CreatedAt], record[Id], err)
 			incorrectRecords++
 			continue
 		}
 
 		items = append(items, Item{id, name, category, price, createdAt})
-
-		log.Println("New item", id, name, category, price, createdAt)
 	}
 	lenRead := len(records) - 1
 	log.Printf("Read %d records, %d incorrect\n", lenRead, incorrectRecords)
@@ -142,7 +161,7 @@ func saveItems(ctx context.Context, items []Item) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx,
-		"INSERT INTO prices (id, name, category, price, created) VALUES($1,$2,$3,$4,$5)")
+		"INSERT INTO prices (id, name, category, price, create_date) VALUES($1,$2,$3,$4,$5)")
 	if err != nil {
 		return err
 	}
@@ -157,7 +176,16 @@ func saveItems(ctx context.Context, items []Item) error {
 	return tx.Commit()
 }
 
-func readItems(ctx context.Context) ([]Item, error) {
+func readAllItems(ctx context.Context) ([]Item, error) {
+	return readItems(ctx, "SELECT * from prices")
+}
+
+func readFilteredItems(ctx context.Context, p filterParams) ([]Item, error) {
+	return readItems(ctx, "SELECT * from prices WHERE create_date between $1 and $2 AND price >= $3 and price <= $4",
+		p.startDate, p.endDate, p.minPrice, p.maxPrice)
+}
+
+func readItems(ctx context.Context, query string, args ...any) ([]Item, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
@@ -167,7 +195,7 @@ func readItems(ctx context.Context) ([]Item, error) {
 
 	var items []Item
 
-	rows, err := DB.QueryContext(ctx, "SELECT * from prices")
+	rows, err := DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +320,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 
 	// find and open data.csv from archive
 	for name, content := range archiveContents {
-		if filepath.Base(name) != "data.csv" {
+		if filepath.Ext(name) != ".csv" {
 			continue
 		}
 
@@ -309,7 +337,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// get everything from database
-	itemsDb, err := readItems(r.Context())
+	itemsDb, err := readAllItems(r.Context())
 	if err != nil {
 		log.Println(err)
 		http.Error(w, "Error reading database", http.StatusInternalServerError)
@@ -371,12 +399,46 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 func getHandler(w http.ResponseWriter, r *http.Request) {
 	var items []Item
 
-	// get everything from database
-	items, err := readItems(r.Context())
+	params := setDefaultFilterParams()
+
+	formStart := r.FormValue("start")
+	formEnd := r.FormValue("end")
+	formMin := r.FormValue("min")
+	formMax := r.FormValue("max")
+
+	// validate input
+	_, err := time.Parse("2006-01-02", formStart)
+	if err == nil {
+		params.startDate = formStart
+	}
+
+	_, err = time.Parse("2006-01-02", formEnd)
+	if err == nil {
+		params.endDate = formEnd
+	}
+
+	formMinInt, err := strconv.Atoi(formMin)
+	if err != nil && formMinInt > 0 {
+		params.minPrice = formMinInt
+	}
+
+	formMaxInt, err := strconv.Atoi(formMax)
+	if err != nil && formMaxInt > 0 {
+		params.maxPrice = formMaxInt
+	}
+
+	items, err = readFilteredItems(r.Context(), params)
 	if err != nil {
 		log.Println(err)
 		http.Error(w, "Error reading items", http.StatusInternalServerError)
 	}
+
+	// get everything from database
+	/*items, err := readAllItems(r.Context())
+	if err != nil {
+		log.Println(err)
+		http.Error(w, "Error reading items", http.StatusInternalServerError)
+	}*/
 
 	// prepare csv
 	csvFile, err := createCsvFile(items)
