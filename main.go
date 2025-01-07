@@ -15,18 +15,11 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-)
-
-const (
-	DB_HOST = "localhost"
-	DB_PORT = 5432
-	DB_USER = "validator"
-	DB_PASS = "val1dat0r"
-	DB_NAME = "project-sem-1"
 )
 
 var DB *sql.DB
@@ -491,8 +484,14 @@ func getHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	ps := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME)
+	dbHost := os.Getenv("POSTGRES_HOST")
+	dbPort := os.Getenv("POSTGRES_PORT")
+	dbUser := os.Getenv("POSTGRES_USER")
+	dbPass := os.Getenv("POSTGRES_PASSWORD")
+	dbName := os.Getenv("POSTGRES_DB")
+
+	ps := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		dbHost, dbPort, dbUser, dbPass, dbName)
 
 	var err error
 
