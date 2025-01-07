@@ -50,10 +50,10 @@ jobs:
         chmod +x scripts/tests.sh
 
     - name: Prepare environment
-      run: ./scripts/prepare.sh
+      run: CGO_ENABLED=0 GOOS=linux go build -o project_store
 
     - name: Run application
-      run: ./scripts/run.sh
+      run: ./project_store
       env:
         POSTGRES_HOST: localhost
         POSTGRES_PORT: 5432
