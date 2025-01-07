@@ -1,3 +1,3 @@
 #!/bin/bash
 
- docker build -t project_store ../.
+docker build -t project_store ../.
