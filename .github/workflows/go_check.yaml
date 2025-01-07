@@ -23,7 +23,6 @@ jobs:
         # Добавляем volume для сохранения данных
         volumes:
           - postgres_data:/var/lib/postgresql/data
-          - ./init.sql:/docker-entrypoint-initdb.d/init.sql
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -32,6 +31,12 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+
+    - name: Prepare database
+      run: |
+        psql -h localhost -p 5432 -U validator -d project-sem-1 -f init.sql
+      env:
+        PGPASSWORD: val1dat0r
 
     - name: Set up Go
       uses: actions/setup-go@v4
