@@ -4,6 +4,7 @@ YC_TOKEN="${YC_TOKEN:-""}"
 NAME_PREFIX="${NAME_PREFIX:-"my"}"
 SSH_PASSPHRASE="${SSH_PASSPHRASE:-""}"
 YC_ZONE="${YC_ZONE:-"ru-central1-a"}"
+YC_CLOUD_ID="${YC_CLOUD_ID:-""}"
 YC_FOLDER="${YC_FOLDER:-"default"}"
 
 YC_PATH="$(pwd)"/yc
@@ -15,6 +16,7 @@ curl -sS https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
 
 echo "Configuring yc..."
 $YC_BIN config set token "${YC_TOKEN}"
+$YC_BIN config set cloud-id "${YC_CLOUD_ID}"
 $YC_BIN config set folder-name "${YC_FOLDER}"
 
 echo "Creating network..."
