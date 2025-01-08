@@ -7,12 +7,16 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Конфигурация
-API_HOST="http://localhost:8080"
-DB_HOST="localhost"
+REMOTE_HOST="${REMOTE_HOST:-"localhost"}"
+
+API_HOST="http://${REMOTE_HOST}:8080"
+DB_HOST=${REMOTE_HOST}
 DB_PORT="5432"
 DB_NAME="project-sem-1"
 DB_USER="validator"
 DB_PASSWORD="val1dat0r"
+
+echo "Testing $REMOTE_HOST"
 
 # Временные файлы для тестирования
 TEST_ZIP="test_data.zip"
