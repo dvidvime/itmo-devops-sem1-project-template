@@ -101,6 +101,6 @@ echo "Testing..."
 
 export REMOTE_HOST="${VM_IP}"
 
-source "$(pwd)"/tests.sh 1
-source "$(pwd)"/tests.sh 2
-source "$(pwd)"/tests.sh 3
+./scripts/tests.sh 1
+./scripts/tests.sh 2
+./scripts/tests.sh 3
