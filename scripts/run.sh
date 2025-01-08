@@ -73,7 +73,7 @@ while [[ $attempt -le $max_attempts ]]; do
     echo "SSH test passed"
     break
   else
-    echo "SSH connection test failed: ${resp}. Attempt $attempt of $max_attempts"
+    echo "SSH connection test failed. Attempt $attempt of $max_attempts"
     if [[ $attempt -eq $max_attempts ]]; then
       exit 1
     fi
