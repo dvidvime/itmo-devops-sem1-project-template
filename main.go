@@ -137,49 +137,84 @@ func readCsvFile(csvFile io.Reader) ([]Item, int, error) {
 	return items, lenRead, nil
 }
 
-func saveItems(ctx context.Context, items []Item) error {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+func saveItems(ctx context.Context, items []Item) (int, float64, int, error) {
+	// counter of duplicates
+	var duplicates int
+	var totalPrice float64
+	var totalCategories int
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	// check connection
 	if err := DB.PingContext(ctx); err != nil {
-		return err
+		return duplicates, totalPrice, totalCategories, err
 	}
 
 	tx, err := DB.Begin()
 	if err != nil {
-		return err
+		return duplicates, totalPrice, totalCategories, err
 	}
 
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx,
+	selStmt, err := tx.PrepareContext(ctx,
+		"SELECT COUNT(*) FROM prices WHERE name = $1 AND category = $2 AND price = $3 AND create_date = $4")
+	if err != nil {
+		return duplicates, totalPrice, totalCategories, err
+	}
+	defer selStmt.Close()
+
+	insStmt, err := tx.PrepareContext(ctx,
 		"INSERT INTO prices (id, name, category, price, create_date) VALUES($1,$2,$3,$4,$5)")
 	if err != nil {
-		return err
+		return duplicates, totalPrice, totalCategories, err
 	}
-	defer stmt.Close()
+	defer insStmt.Close()
+
 	for _, i := range items {
+		var cnt int
+
+		err := selStmt.QueryRowContext(ctx, i.Name, i.Category, i.Price, i.CreatedAt).Scan(&cnt)
+		if err != nil && err != sql.ErrNoRows {
+			return duplicates, totalPrice, totalCategories, err
+		}
+
+		if cnt > 0 {
+			duplicates++
+			continue
+		}
+
 		//fmt.Printf("%+v\n", i)
-		_, err := stmt.ExecContext(ctx, i.Id, i.Name, i.Category, i.Price, i.CreatedAt)
+		_, err = insStmt.ExecContext(ctx, i.Id, i.Name, i.Category, i.Price, i.CreatedAt)
 		if err != nil {
-			return err
+			return duplicates, totalPrice, totalCategories, err
 		}
 	}
-	return tx.Commit()
-}
 
-func readAllItems(ctx context.Context) ([]Item, error) {
-	return readItems(ctx, "SELECT * from prices")
+	// retrieve total price
+	row := tx.QueryRowContext(ctx, "SELECT SUM(price) FROM prices")
+	if err = row.Scan(&totalPrice); err != nil {
+		log.Println("Failed to retrieve total price", err)
+	}
+
+	// retrieve total categories
+	row = tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT category) FROM prices")
+	if err = row.Scan(&totalCategories); err != nil {
+		log.Println("Failed to retrieve total categories", err)
+	}
+
+	return duplicates, totalPrice, totalCategories, tx.Commit()
 }
 
 func readFilteredItems(ctx context.Context, p filterParams) ([]Item, error) {
-	return readItems(ctx, "SELECT * from prices WHERE create_date between $1 and $2 AND price >= $3 and price <= $4",
+	return readItems(ctx,
+		"SELECT id, name, category, price, create_date FROM prices WHERE create_date between $1 AND $2 AND price >= $3 AND price <= $4",
 		p.startDate, p.endDate, p.minPrice, p.maxPrice)
 }
 
 func readItems(ctx context.Context, query string, args ...any) ([]Item, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := DB.PingContext(ctx); err != nil {
@@ -210,26 +245,6 @@ func readItems(ctx context.Context, query string, args ...any) ([]Item, error) {
 		return nil, err
 	}
 	return items, nil
-}
-
-func removeDuplicates(left []Item, right []Item) ([]Item, int) {
-	// remove from left elements found in right and count duplicates
-	rMap := make(map[int]struct{})
-	for _, b := range right {
-		rMap[b.Id] = struct{}{}
-	}
-
-	var uniqueItems []Item
-	for _, a := range left {
-		if _, found := rMap[a.Id]; !found {
-			uniqueItems = append(uniqueItems, a)
-		}
-	}
-
-	d := len(left) - len(uniqueItems)
-	log.Printf("Removed %d duplicates\n", d)
-
-	return uniqueItems, d
 }
 
 func extractArchive(file multipart.File, fileHeader *multipart.FileHeader, paramType string) (map[string][]byte, error) {
@@ -286,6 +301,7 @@ func extractArchive(file multipart.File, fileHeader *multipart.FileHeader, param
 func postHandler(w http.ResponseWriter, r *http.Request) {
 	var items []Item
 	var itemsRead int
+	var duplicatesCount int
 	var totalCategories int
 	var totalPrice float64
 
@@ -329,33 +345,11 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		break
 	}
 
-	// get everything from database
-	itemsDb, err := readAllItems(r.Context())
-	if err != nil {
-		log.Println(err)
-		http.Error(w, "Error reading database", http.StatusInternalServerError)
-		return
-	}
-
-	items, duplicatesCount := removeDuplicates(items, itemsDb)
-
 	// write to database
-	if err = saveItems(r.Context(), items); err != nil {
+	if duplicatesCount, totalPrice, totalCategories, err = saveItems(r.Context(), items); err != nil {
 		log.Println(err)
 		http.Error(w, "Error writing to database", http.StatusBadRequest)
 		return
-	}
-
-	// retrieve total price
-	row := DB.QueryRowContext(r.Context(), "SELECT SUM(price) FROM prices")
-	if err = row.Scan(&totalPrice); err != nil {
-		log.Println("Failed to retrieve total price", err)
-	}
-
-	// retrieve total categories
-	row = DB.QueryRowContext(r.Context(), "SELECT COUNT(DISTINCT category) FROM prices")
-	if err = row.Scan(&totalCategories); err != nil {
-		log.Println("Failed to retrieve total categories", err)
 	}
 
 	// return JSON with summary
@@ -426,13 +420,6 @@ func getHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error reading items", http.StatusInternalServerError)
 	}
 
-	// get everything from database
-	/*items, err := readAllItems(r.Context())
-	if err != nil {
-		log.Println(err)
-		http.Error(w, "Error reading items", http.StatusInternalServerError)
-	}*/
-
 	// prepare csv
 	csvFile, err := createCsvFile(items)
 	if err != nil {
@@ -459,28 +446,6 @@ func getHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	/*csvWriter := csv.NewWriter(w)
-
-	w.Header().Set("Content-Type", "text/csv")
-
-	if err := csvWriter.WriteAll(csvFile); err != nil {
-		log.Println(err)
-		http.Error(w, "Error writing response", http.StatusInternalServerError)
-	}*/
-
-	/*w.Header().Set("Content-Type", "application/json")
-
-	jsonData, err := json.Marshal(items)
-	if err != nil {
-		log.Println(err)
-		http.Error(w, "Error marshalling json", http.StatusInternalServerError)
-	}
-
-	if _, err := w.Write(jsonData); err != nil {
-		log.Println(err)
-		http.Error(w, "Error writing response", http.StatusInternalServerError)
-	}*/
 }
 
 func main() {
