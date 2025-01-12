@@ -32,6 +32,14 @@ type Item struct {
 	CreatedAt time.Time
 }
 
+type resultSummary struct {
+	TotalCount      int     `json:"total_count"`
+	DuplicatesCount int     `json:"duplicates_count"`
+	TotalItems      int     `json:"total_items"`
+	TotalCategories int     `json:"total_categories"`
+	TotalPrice      float64 `json:"total_price"`
+}
+
 type filterParams struct {
 	startDate string
 	endDate   string
@@ -74,12 +82,12 @@ func createCsvFile(items []Item) ([][]string, error) {
 	return result, nil
 }
 
-func readCsvFile(csvFile io.Reader) ([]Item, int, error) {
+func readCsvFile(csvFile io.Reader) ([]Item, error) {
 	csvReader := csv.NewReader(csvFile)
 	records, err := csvReader.ReadAll()
 	if err != nil {
 		log.Println(err)
-		return nil, 0, err
+		return nil, err
 	}
 
 	const (
@@ -134,26 +142,25 @@ func readCsvFile(csvFile io.Reader) ([]Item, int, error) {
 	}
 	lenRead := len(records) - 1
 	log.Printf("Read %d records, %d incorrect\n", lenRead, incorrectRecords)
-	return items, lenRead, nil
+	return items, nil
 }
 
-func saveItems(ctx context.Context, items []Item) (int, float64, int, error) {
-	// counter of duplicates
-	var duplicates int
-	var totalPrice float64
-	var totalCategories int
+func saveItems(ctx context.Context, items []Item) (resultSummary, error) {
+	var result resultSummary
+
+	result.TotalCount = len(items)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	// check connection
 	if err := DB.PingContext(ctx); err != nil {
-		return duplicates, totalPrice, totalCategories, err
+		return result, err
 	}
 
 	tx, err := DB.Begin()
 	if err != nil {
-		return duplicates, totalPrice, totalCategories, err
+		return result, err
 	}
 
 	defer tx.Rollback()
@@ -161,14 +168,14 @@ func saveItems(ctx context.Context, items []Item) (int, float64, int, error) {
 	selStmt, err := tx.PrepareContext(ctx,
 		"SELECT COUNT(*) FROM prices WHERE name = $1 AND category = $2 AND price = $3 AND create_date = $4")
 	if err != nil {
-		return duplicates, totalPrice, totalCategories, err
+		return result, err
 	}
 	defer selStmt.Close()
 
 	insStmt, err := tx.PrepareContext(ctx,
-		"INSERT INTO prices (id, name, category, price, create_date) VALUES($1,$2,$3,$4,$5)")
+		"INSERT INTO prices (name, category, price, create_date) VALUES($1,$2,$3,$4)")
 	if err != nil {
-		return duplicates, totalPrice, totalCategories, err
+		return result, err
 	}
 	defer insStmt.Close()
 
@@ -177,34 +184,36 @@ func saveItems(ctx context.Context, items []Item) (int, float64, int, error) {
 
 		err := selStmt.QueryRowContext(ctx, i.Name, i.Category, i.Price, i.CreatedAt).Scan(&cnt)
 		if err != nil && err != sql.ErrNoRows {
-			return duplicates, totalPrice, totalCategories, err
+			return result, err
 		}
 
 		if cnt > 0 {
-			duplicates++
+			result.DuplicatesCount++
 			continue
 		}
 
 		//fmt.Printf("%+v\n", i)
-		_, err = insStmt.ExecContext(ctx, i.Id, i.Name, i.Category, i.Price, i.CreatedAt)
+		_, err = insStmt.ExecContext(ctx, i.Name, i.Category, i.Price, i.CreatedAt)
 		if err != nil {
-			return duplicates, totalPrice, totalCategories, err
+			return result, err
 		}
+		result.TotalItems++
 	}
 
 	// retrieve total price
 	row := tx.QueryRowContext(ctx, "SELECT SUM(price) FROM prices")
-	if err = row.Scan(&totalPrice); err != nil {
+	if err = row.Scan(&result.TotalPrice); err != nil {
 		log.Println("Failed to retrieve total price", err)
 	}
+	result.TotalPrice = roundFloat(result.TotalPrice, 2)
 
 	// retrieve total categories
 	row = tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT category) FROM prices")
-	if err = row.Scan(&totalCategories); err != nil {
+	if err = row.Scan(&result.TotalCategories); err != nil {
 		log.Println("Failed to retrieve total categories", err)
 	}
 
-	return duplicates, totalPrice, totalCategories, tx.Commit()
+	return result, tx.Commit()
 }
 
 func readFilteredItems(ctx context.Context, p filterParams) ([]Item, error) {
@@ -300,10 +309,7 @@ func extractArchive(file multipart.File, fileHeader *multipart.FileHeader, param
 
 func postHandler(w http.ResponseWriter, r *http.Request) {
 	var items []Item
-	var itemsRead int
-	var duplicatesCount int
-	var totalCategories int
-	var totalPrice float64
+	var summary resultSummary
 
 	paramType := r.FormValue("type")
 
@@ -335,7 +341,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 
 		f := bytes.NewReader(content)
 
-		items, itemsRead, err = readCsvFile(f)
+		items, err = readCsvFile(f)
 		if err != nil {
 			log.Println(err)
 			http.Error(w, "Error reading csv", http.StatusInternalServerError)
@@ -346,30 +352,16 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// write to database
-	if duplicatesCount, totalPrice, totalCategories, err = saveItems(r.Context(), items); err != nil {
+	summary, err = saveItems(r.Context(), items)
+	if err != nil {
 		log.Println(err)
 		http.Error(w, "Error writing to database", http.StatusBadRequest)
 		return
 	}
 
-	// return JSON with summary
-	resultSummary := struct {
-		TotalCount      int     `json:"total_count"`
-		DuplicatesCount int     `json:"duplicates_count"`
-		TotalItems      int     `json:"total_items"`
-		TotalCategories int     `json:"total_categories"`
-		TotalPrice      float64 `json:"total_price"`
-	}{
-		TotalCount:      itemsRead,
-		DuplicatesCount: duplicatesCount,
-		TotalItems:      len(items),
-		TotalCategories: totalCategories,
-		TotalPrice:      roundFloat(totalPrice, 2),
-	}
+	log.Printf("%+v\n", summary)
 
-	log.Printf("%+v\n", resultSummary)
-
-	jsonData, err := json.Marshal(resultSummary)
+	jsonData, err := json.Marshal(summary)
 	if err != nil {
 		log.Println(err)
 		http.Error(w, "Error marshalling json", http.StatusInternalServerError)
